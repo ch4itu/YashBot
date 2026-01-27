@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
+    <title>⚡ Voice Commander</title>
+    <style>
+        body { background: #000; color: #0f0; font-family: monospace; padding: 15px; display: flex; flex-direction: column; height: 90vh; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #333; padding-bottom: 10px;}
+        textarea { width: 100%; flex-grow: 1; background: #111; border: 1px solid #333; color: #fff; padding: 15px; font-size: 16px; border-radius: 8px; resize: none; outline: none; }
+        .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; }
+        button { padding: 20px; border: none; font-weight: bold; border-radius: 8px; font-size: 16px; cursor: pointer; text-transform: uppercase; }
+        #micBtn { background: #333; color: #fff; }
+        #micBtn.listening { background: #f00; animation: pulse 1s infinite; }
+        #sendBtn { background: #0f0; color: #000; }
+        #sendBtn:disabled { background: #1a4d2e; color: #444; }
+        .panel { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #000; padding: 20px; box-sizing: border-box; z-index: 10; display: none; }
+        .panel.show { display: block; }
+        input, select { width: 100%; padding: 15px; margin-bottom: 10px; background: #222; border: 1px solid #444; color: #fff; border-radius: 5px; box-sizing: border-box; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>VOICE COMMANDER <span id="netBadge" style="font-size:10px; color:#666;">TESTNET</span></div>
+        <div onclick="toggleSettings()" style="cursor:pointer">⚙️</div>
+    </div>
+
+    <textarea id="cmdInput" placeholder="Tap Mic to speak, or type command..."></textarea>
+    
+    <div class="controls">
+        <button id="micBtn" onclick="toggleMic()">🎤 Speak</button>
+        <button id="sendBtn" onclick="sendPayload()">🚀 Send</button>
+    </div>
+    <div id="log" style="font-size: 10px; color: #555; margin-top: 10px; text-align: center;">Ready</div>
+
+    <div id="settingsPanel" class="panel">
+        <h2>Configuration</h2>
+        <label>Network</label>
+        <select id="networkSelector">
+            <option value="testnet" selected>Testnet (Free)</option>
+            <option value="mainnet">Mainnet (Real)</option>
+        </select>
+        <label>Target Address (PC)</label>
+        <input type="text" id="targetAddr">
+        <label>Sender Mnemonic (25 Words)</label>
+        <input type="password" id="mnemonic">
+        <label>Encryption Password</label>
+        <input type="password" id="encPass">
+        <button onclick="saveSettings()" style="background:#0f0; color:#000;">Save & Close</button>
+    </div>
+
+    <script src="https://unpkg.com/algosdk@2.7.0/dist/browser/algosdk.min.js"></script>
+    <script>
+        // --- SPEECH ---
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition;
+        let isListening = false;
+
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.continuous = false; // Stop after one sentence for better accuracy
+            recognition.lang = 'en-US';
+            recognition.onstart = () => { isListening = true; document.getElementById('micBtn').classList.add('listening'); document.getElementById('log').innerText = "Listening..."; };
+            recognition.onend = () => { isListening = false; document.getElementById('micBtn').classList.remove('listening'); document.getElementById('log').innerText = "Ready"; };
+            recognition.onresult = (e) => { document.getElementById('cmdInput').value += (document.getElementById('cmdInput').value.length > 0 ? " " : "") + e.results[0][0].transcript; };
+        } else { alert("Use Chrome for Voice."); }
+
+        function toggleMic() {
+            if (!recognition) return;
+            if (isListening) recognition.stop(); else recognition.start();
+        }
+
+        // --- CRYPTO & SEND ---
+        async function encrypt(text, password) {
+            const enc = new TextEncoder();
+            const keyMaterial = await window.crypto.subtle.importKey("raw", enc.encode(password), {name: "PBKDF2"}, false, ["deriveKey"]);
+            const key = await window.crypto.subtle.deriveKey({name: "PBKDF2", salt: enc.encode("somesalt"), iterations: 100000, hash: "SHA-256"}, keyMaterial, {name: "AES-GCM", length: 256}, false, ["encrypt"]);
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            const cipher = await window.crypto.subtle.encrypt({name: "AES-GCM", iv: iv}, key, enc.encode(text));
+            const combined = new Uint8Array(iv.length + cipher.byteLength);
+            combined.set(iv);
+            combined.set(new Uint8Array(cipher), iv.length);
+            return btoa(String.fromCharCode(...combined));
+        }
+
+        async function sendPayload() {
+            const btn = document.getElementById('sendBtn');
+            const log = document.getElementById('log');
+            const cmd = document.getElementById('cmdInput').value;
+            const network = document.getElementById('networkSelector').value;
+            const NODE_URL = `https://${network}-api.algonode.cloud`;
+            
+            if(!cmd) return;
+            btn.disabled = true; log.innerText = "Encrypting...";
+
+            try {
+                const encryptedNote = await encrypt("cmd: " + cmd, localStorage.getItem("pass"));
+                const algod = new algosdk.Algodv2("", NODE_URL, "");
+                const params = await algod.getTransactionParams().do();
+                const account = algosdk.mnemonicToSecretKey(localStorage.getItem("mnemo"));
+
+                const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+                    from: account.addr, to: localStorage.getItem("target"), amount: 0,
+                    note: new Uint8Array(Buffer.from(encryptedNote, 'base64')), suggestedParams: params
+                });
+
+                const signedTxn = txn.signTxn(account.sk);
+                log.innerText = "Sending...";
+                await algod.sendRawTransaction(signedTxn).do();
+                log.innerText = "✅ Sent!";
+                document.getElementById('cmdInput').value = ""; 
+            } catch (e) { log.innerText = "❌ Error: " + e.message; }
+            btn.disabled = false;
+        }
+
+        function saveSettings() {
+            localStorage.setItem("target", document.getElementById('targetAddr').value);
+            localStorage.setItem("mnemo", document.getElementById('mnemonic').value);
+            localStorage.setItem("pass", document.getElementById('encPass').value);
+            localStorage.setItem("network", document.getElementById('networkSelector').value);
+            document.getElementById('settingsPanel').classList.remove('show');
+            document.getElementById('netBadge').innerText = document.getElementById('networkSelector').value.toUpperCase();
+        }
+
+        function toggleSettings() { document.getElementById('settingsPanel').classList.add('show'); }
+        if(localStorage.getItem("target")) {
+            document.getElementById('targetAddr').value = localStorage.getItem("target");
+            document.getElementById('mnemonic').value = localStorage.getItem("mnemo");
+            document.getElementById('encPass').value = localStorage.getItem("pass");
+            document.getElementById('networkSelector').value = localStorage.getItem("network") || "testnet";
+            document.getElementById('netBadge').innerText = (localStorage.getItem("network") || "testnet").toUpperCase();
+        } else { toggleSettings(); }
+
+        // Hardened Buffer Polyfill
+        const Buffer = algosdk.Buffer || { from: (s, t) => { 
+            if(t === 'base64') return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+            return new TextEncoder().encode(s);
+        }};
+    </script>
+</body>
+</html>
