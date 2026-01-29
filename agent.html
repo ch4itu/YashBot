@@ -52,6 +52,7 @@
         let INDEXER_URL = "https://testnet-idx.algonode.cloud";
         let lastRound = 0;
         let isProcessing = false;
+        let pollIntervalId = null;
         let dirHandle;
         let memoryContent = "User Name: Owner. Preferences: None.";
 
@@ -196,8 +197,11 @@
             log(`✅ Agent Online. Listening on ${document.getElementById('network').value}...`);
             speak("System Online.");
             
-            // Loop
-            setInterval(() => {
+            // Loop (avoid multiple intervals if re-initialized)
+            if (pollIntervalId) {
+                clearInterval(pollIntervalId);
+            }
+            pollIntervalId = setInterval(() => {
                 checkBlockchain(address, pass);
                 checkSchedule();
             }, 5000);
@@ -210,15 +214,15 @@
                 const data = await res.json();
                 if (!data.transactions?.length) return;
 
-                // Process newest
-                const tx = data.transactions[0];
-                lastRound = tx['confirmed-round'];
-
-                if (tx.note) {
+                // Process oldest-to-newest to avoid skipping messages
+                const sorted = [...data.transactions].sort((a, b) => a['confirmed-round'] - b['confirmed-round']);
+                for (const tx of sorted) {
+                    lastRound = Math.max(lastRound, tx['confirmed-round'] || lastRound);
+                    if (!tx.note) continue;
                     const rawNote = atob(tx.note);
                     log(`🔍 Signal Detected. Decrypting...`);
                     const cleanCommand = await decryptMessage(rawNote, password);
-                    
+
                     if (cleanCommand && cleanCommand.startsWith("cmd:")) {
                         await runAI(cleanCommand.replace("cmd:", "").trim());
                     }
@@ -251,7 +255,7 @@
                         body: JSON.stringify({ contents: [{ parts: [{ text: systemPrompt + "\nUSER: " + prompt }] }] })
                     });
                     const res = await req.json();
-                    text = res.candidates[0].content.parts[0].text;
+                    text = res?.candidates?.[0]?.content?.parts?.[0]?.text || "";
                 } else {
                     const endpoint = provider === 'grok' ? 'https://api.grok.x.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
                     const model = provider === 'grok' ? 'grok-beta' : 'gpt-4o';
@@ -264,7 +268,11 @@
                         })
                     });
                     const res = await req.json();
-                    text = res.choices[0].message.content;
+                    text = res?.choices?.[0]?.message?.content || "";
+                }
+
+                if (!text) {
+                    throw new Error("AI response was empty or malformed.");
                 }
 
                 if (text.includes("MEMORY_UPDATE:")) {
