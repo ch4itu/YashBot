@@ -91,16 +91,23 @@
             const NODE_URL = `https://${network}-api.algonode.cloud`;
             
             if(!cmd) return;
+            const target = localStorage.getItem("target");
+            const mnemonic = localStorage.getItem("mnemo");
+            const passphrase = localStorage.getItem("pass");
+            if (!target || !mnemonic || !passphrase) {
+                log.innerText = "❌ Missing settings. Open ⚙️ and save.";
+                return;
+            }
             btn.disabled = true; log.innerText = "Encrypting...";
 
             try {
-                const encryptedNote = await encrypt("cmd: " + cmd, localStorage.getItem("pass"));
+                const encryptedNote = await encrypt("cmd: " + cmd, passphrase);
                 const algod = new algosdk.Algodv2("", NODE_URL, "");
                 const params = await algod.getTransactionParams().do();
-                const account = algosdk.mnemonicToSecretKey(localStorage.getItem("mnemo"));
+                const account = algosdk.mnemonicToSecretKey(mnemonic);
 
                 const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
-                    from: account.addr, to: localStorage.getItem("target"), amount: 0,
+                    from: account.addr, to: target, amount: 0,
                     note: new Uint8Array(Buffer.from(encryptedNote, 'base64')), suggestedParams: params
                 });
 
